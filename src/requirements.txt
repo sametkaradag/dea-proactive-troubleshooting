@@ -1,0 +1,6 @@
+functions-framework==3.*
+google-cloud-logging
+google-auth
+requests
+google-cloud-monitoring
+google-cloud-pubsub

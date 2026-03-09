@@ -1,2 +1,6 @@
 .DS_Store
 .gemini/
+.antigravity/
+__pycache__/
+*.pyc
+*.zip
