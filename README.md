@@ -29,12 +29,12 @@ The entire architecture can be deployed using the provided `setup.sh` script.
 Before running the script, you can configure the environment variables at the top of `setup.sh` or pass them in at runtime:
 
 ```bash
-export PROJECT_ID="bq-dataworkeragent-test"
+export PROJECT_ID="project-id"
 export REGION="us-central1"
 export USER_EMAIL="your-email@google.com" # The email to receive the RCA reports
 
 # Optional: Comma-separated list of repository names to filter. Leave empty for all repositories.
-export ALLOWED_DATAFORM_REPOSITORIES="prisa-test, ecommerce-pipeline" 
+export ALLOWED_DATAFORM_REPOSITORIES="repo1,repo2" 
 ```
 
 ### Installation
