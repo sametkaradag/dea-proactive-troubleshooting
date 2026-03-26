@@ -2,11 +2,14 @@ import base64
 import json
 import logging
 import os
-import uuid
 import re
+import uuid
+import time
 import requests
 import google.auth
 import functions_framework
+from google.cloud import logging as cloud_logging
+from google.cloud import dataform_v1beta1
 from google.auth.transport.requests import Request
 
 # Configure logging
@@ -51,10 +54,125 @@ def prepare_draft_workspace(project_id, location, repo_id, workspace_id):
     logger.error(f"Failed to check workspace {workspace_id}: {response.text}")
     return False
 
-def call_dea_agent(project_id, location, repo_id, workspace_id, job_id, user_email, original_workspace_id):
-    """Calls the Data Engineering Agent (DEA) to analyze the failure."""
+def get_invocation_error_details(project_id, location, repo_id, job_id):
+    """Uses the Dataform API to retrieve the workflow invocation details and failed action errors.
     
-    url = f"https://geminidataanalytics.googleapis.com/v1/a2a/projects/{project_id}/locations/{location}/agents/dataengineeringagent/v1/message:stream"
+    Returns a structured string with the invocation state, failure reason,
+    and per-action error messages for all failed tasks.
+    Falls back to Cloud Logging if the Dataform API call fails.
+    """
+    error_parts = []
+    
+    try:
+        client = dataform_v1beta1.DataformClient()
+        invocation_name = (
+            f"projects/{project_id}/locations/{location}/repositories/{repo_id}"
+            f"/workflowInvocations/{job_id}"
+        )
+        
+        # 1. Get the workflow invocation to retrieve its overall state and failure reason
+        try:
+            invocation = client.get_workflow_invocation(
+                request=dataform_v1beta1.GetWorkflowInvocationRequest(name=invocation_name)
+            )
+            state_name = dataform_v1beta1.WorkflowInvocation.State(invocation.state).name
+            error_parts.append(f"Workflow Invocation State: {state_name}")
+            
+            # The invocation object may contain a `failure_reason` field
+            if hasattr(invocation, 'failure_reason') and invocation.failure_reason:
+                error_parts.append(f"Invocation Failure Reason: {invocation.failure_reason}")
+        except Exception as inv_err:
+            logger.warning(f"Could not fetch workflow invocation details: {inv_err}")
+        
+        # 2. Query all actions in this invocation and collect FAILED ones
+        try:
+            actions_pager = client.query_workflow_invocation_actions(
+                request=dataform_v1beta1.QueryWorkflowInvocationActionsRequest(
+                    name=invocation_name
+                )
+            )
+            
+            failed_actions = []
+            for action in actions_pager:
+                # Check if the action state is FAILED (enum value 3)
+                if action.state == dataform_v1beta1.WorkflowInvocationAction.State.FAILED:
+                    target = action.target
+                    action_name = f"{target.database}.{target.schema}.{target.name}" if target else "Unknown"
+                    error_msg = action.failure_reason if hasattr(action, 'failure_reason') and action.failure_reason else "No error message provided."
+                    
+                    # Also capture the BigQuery action details if available
+                    bq_action = ""
+                    if hasattr(action, 'bigquery_action') and action.bigquery_action:
+                        if hasattr(action.bigquery_action, 'sql_script') and action.bigquery_action.sql_script:
+                            bq_action = f"\n  SQL: {action.bigquery_action.sql_script[:500]}"  # Truncate long SQL
+                    
+                    failed_actions.append(
+                        f"FAILED Task: {action_name}\n"
+                        f"  Error: {error_msg}{bq_action}"
+                    )
+            
+            if failed_actions:
+                error_parts.append(f"\nFailed Actions ({len(failed_actions)} total):")
+                error_parts.extend(failed_actions)
+            else:
+                error_parts.append("No individual action failures found via Dataform API.")
+                
+        except Exception as action_err:
+            logger.warning(f"Could not query workflow invocation actions: {action_err}")
+    
+    except Exception as api_err:
+        logger.warning(f"Dataform API call failed, falling back to Cloud Logging: {api_err}")
+    
+    # 3. Fallback / supplement: also query Cloud Logging for additional context
+    try:
+        logging_client = cloud_logging.Client(project=project_id)
+        filter_str = (
+            f'resource.type="dataform.googleapis.com/Repository" '
+            f'AND labels.workflow_invocation_id="{job_id}" '
+            f'AND (jsonPayload.state="FAILED" OR severity="ERROR")'
+        )
+        entries = logging_client.list_entries(
+            filter_=filter_str,
+            order_by=cloud_logging.DESCENDING,
+            max_results=20
+        )
+        
+        log_failures = []
+        for entry in entries:
+            if isinstance(entry.json_payload, dict):
+                action_id = entry.json_payload.get("actionId", {}).get("name", "")
+                err_msg = entry.json_payload.get("errorMessage", "")
+                state = entry.json_payload.get("state", "")
+                failure_reason = entry.json_payload.get("failureReason", "")
+                
+                detail = ""
+                if action_id and (err_msg or failure_reason):
+                    detail = f"Log Action '{action_id}': {err_msg or failure_reason}"
+                elif err_msg:
+                    detail = f"Log Error: {err_msg}"
+                elif failure_reason:
+                    detail = f"Log Failure Reason: {failure_reason}"
+                elif state == "FAILED":
+                    detail = f"Log Entry (FAILED): {json.dumps(entry.json_payload, default=str)[:300]}"
+                
+                if detail and detail not in log_failures:
+                    log_failures.append(detail)
+            elif entry.text_payload:
+                log_failures.append(f"Log Text: {entry.text_payload[:300]}")
+        
+        if log_failures:
+            error_parts.append("\nAdditional details from Cloud Logging:")
+            error_parts.extend(log_failures)
+    except Exception as log_err:
+        logger.warning(f"Cloud Logging query failed: {log_err}")
+    
+    return "\n".join(error_parts) if error_parts else ""
+
+
+def call_dea_agent(project_id, location, repo_id, workspace_id, job_id, user_email, original_workspace_id="default", error_details=""):
+    """Calls the Data Engineering Agent (DEA) to analyze the failure and apply fixes to the draft workspace."""
+    
+    url = f"https://geminidataanalytics.googleapis.com/v1/a2a/projects/{project_id}/locations/us/agents/dataengineeringagent/v1/message:stream"
     
     token = get_access_token()
     headers = {
@@ -62,12 +180,14 @@ def call_dea_agent(project_id, location, repo_id, workspace_id, job_id, user_ema
         "Content-Type": "application/json"
     }
     
-    # Construct the prompt
+    # Construct a detailed prompt with error context and fix instructions
     prompt = (
         f"Dataform job {job_id} failed in repository {repo_id} (original workspace: {original_workspace_id}). "
         f"Please analyze the failure, provide a Root Cause Analysis (RCA), and apply the necessary fixes "
         f"directly to the draft workspace {workspace_id}."
     )
+    if error_details:
+        prompt += f"\n\nHere are the error details, failed tasks, and error messages from the last invocation:\n{error_details}"
     
     # payload matches the user provided template
     payload = {
@@ -134,9 +254,8 @@ def call_dea_agent(project_id, location, repo_id, workspace_id, job_id, user_ema
         logger.error(f"Error calling DEA: {e}")
         return f"Failed to get analysis from DEA. Error: {e}"
 
-def generate_html_email(project_id, location, repo_id, workspace_id, job_id, rca_text):
+def generate_html_email(project_id, location, repo_id, workspace_id, job_id, rca_text, workspace_url, pipeline_name):
     """Generates a beautifully styled HTML email with GCP logo, RCA, and Workspace button."""
-    workspace_url = f"https://console.cloud.google.com/bigquery/dataform/locations/{location}/repositories/{repo_id}/workspaces/{workspace_id}?project={project_id}"
     
     # Replace newlines with <br> for HTML rendering of the RCA text
     rca_html = rca_text.replace('\n', '<br>')
@@ -184,7 +303,7 @@ def generate_html_email(project_id, location, repo_id, workspace_id, job_id, rca
             </div>
             
             <div class="button-container">
-                <a href="{workspace_url}" class="button" target="_blank">Open Dataform Workspace</a>
+                <a href="{workspace_url}" class="button" target="_blank">Open {pipeline_name}</a>
             </div>
         </div>
     </body>
@@ -192,12 +311,14 @@ def generate_html_email(project_id, location, repo_id, workspace_id, job_id, rca
     """
     return html
 
-def send_email(project_id, recipient, subject, html_body, rca_text, workspace_url):
+def send_email(project_id, recipient, subject, html_body, rca_text, workspace_url, pipeline_name):
     """
     Dynamically injects the RCA into the Cloud Monitoring Alert Policy documentation field.
     Then triggers the log metric so the email includes the updated RCA!
     """
     logger.info("Updating Alert Policy documentation...")
+    policy_updated = False
+    policy_name = None
     try:
         from google.cloud import monitoring_v3
         client = monitoring_v3.AlertPolicyServiceClient()
@@ -211,10 +332,12 @@ def send_email(project_id, recipient, subject, html_body, rca_text, workspace_ur
         policy_to_update = None
         for policy in client.list_alert_policies(request=request):
             policy_to_update = policy
+            policy_name = policy.name
+            logger.info(f"Found alert policy: {policy.name}")
             break
             
         if policy_to_update:
-            docs = f"**{subject}**\n\nThe Data Engineering Agent generated the following Root Cause Analysis:\n\n{rca_text}\n\n---\n\n**[Click here to open the Dataform Workspace]({workspace_url})**"
+            docs = f"**{subject}**\n\nThe Data Engineering Agent generated the following Root Cause Analysis:\n\n{rca_text}\n\n---\n\n**[🚀 Click here to open the {pipeline_name}]({workspace_url})**"
             policy_to_update.documentation.content = docs
             
             update_mask = {"paths": ["documentation.content"]}
@@ -222,15 +345,43 @@ def send_email(project_id, recipient, subject, html_body, rca_text, workspace_ur
                 alert_policy=policy_to_update,
                 update_mask=update_mask
             )
-            client.update_alert_policy(request=update_req)
-            logger.info("Successfully dynamically injected RCA into Alert Policy documentation!")
+            updated_policy = client.update_alert_policy(request=update_req)
+            logger.info(f"Successfully injected RCA into Alert Policy documentation! Policy: {updated_policy.name}")
+            policy_updated = True
         else:
-            logger.warning("Could not find the target Alert Policy to inject text into!")
+            logger.warning("Could not find the target Alert Policy 'Dataform RCA Generated Alert' to inject text into!")
             
     except Exception as e:
-        logger.error(f"Failed to inject dynamic documentation: {e}")
+        logger.error(f"Failed to inject dynamic documentation: {e}", exc_info=True)
         
     logger.info(f"HTML Body:\n{html_body}")
+    
+    if policy_updated:
+        # Wait for the Alert Policy update to propagate before triggering the alert
+        # Cloud Monitoring can take up to 30-60s to propagate documentation changes
+        logger.info("Waiting 30 seconds for Alert Policy update to propagate...")
+        time.sleep(30)
+        
+        # Verify the update actually took effect
+        try:
+            from google.cloud import monitoring_v3
+            verify_client = monitoring_v3.AlertPolicyServiceClient()
+            verify_req = monitoring_v3.GetAlertPolicyRequest(name=policy_name)
+            verified_policy = verify_client.get_alert_policy(request=verify_req)
+            current_docs = verified_policy.documentation.content if verified_policy.documentation else ""
+            
+            if subject in current_docs:
+                logger.info(f"Verified: Alert Policy documentation contains RCA (length: {len(current_docs)} chars)")
+            else:
+                logger.warning(f"Alert Policy documentation may not have propagated yet. Current content starts with: {current_docs[:200]}...")
+                # Wait an additional 30 seconds and try once more
+                logger.info("Waiting additional 30 seconds for propagation...")
+                time.sleep(30)
+        except Exception as verify_err:
+            logger.warning(f"Could not verify alert policy update: {verify_err}")
+    else:
+        logger.warning("Skipping propagation wait since policy update was not successful. Triggering alert anyway.")
+    
     logger.warning("DATAFORM_RCA_GENERATED", extra={"json_fields": {"rca_subject": subject}})
 
 @functions_framework.cloud_event
@@ -274,22 +425,46 @@ def troubleshoot_dataform(cloud_event):
             return
 
         user_email = os.environ.get("USER_EMAIL", "sametkaradag@google.com")
+        original_workspace_id = labels.get("workspace_id", "default")
         
         # Convert email to draft workspace ID format: sametkaradag_google_com-agent-draft
         safe_email = re.sub(r'[@\.]', '_', user_email)
         draft_workspace_id = f"{safe_email}-agent-draft"
         
-        # Prepare the draft workspace
+        # Prepare the draft workspace for the DEA to apply fixes
+        logger.info(f"Preparing draft workspace: {draft_workspace_id}")
         prepare_draft_workspace(project_id, location, repo_id, draft_workspace_id)
         
-        original_workspace_id = labels.get("workspace_id", "default")
+        # Retrieve detailed error information using Dataform API + Cloud Logging
+        logger.info(f"Retrieving invocation error details for job {job_id}...")
+        error_details = get_invocation_error_details(project_id, location, repo_id, job_id)
         
-        analysis = call_dea_agent(project_id, location, repo_id, draft_workspace_id, job_id, user_email, original_workspace_id)
-        html_email = generate_html_email(project_id, location, repo_id, draft_workspace_id, job_id, analysis)
+        if error_details:
+            logger.info(f"Retrieved error details ({len(error_details)} chars): {error_details[:500]}...")
+        else:
+            # Final fallback: use whatever the triggering log entry contained
+            logger.warning("No error details retrieved from Dataform API or Cloud Logging. Using trigger payload.")
+            error_details = log_entry.get("textPayload", "")
+            if not error_details and "jsonPayload" in log_entry:
+                error_details = json.dumps(log_entry["jsonPayload"], indent=2)
+
+        analysis = call_dea_agent(
+            project_id, location, repo_id, draft_workspace_id, job_id, user_email,
+            original_workspace_id=original_workspace_id, error_details=error_details
+        )
         
-        workspace_url = f"https://console.cloud.google.com/bigquery/dataform/locations/{location}/repositories/{repo_id}/workspaces/{draft_workspace_id}?project={project_id}"
+        is_uuid = bool(re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", str(repo_id)))
+        if is_uuid:
+            workspace_url = f"https://console.cloud.google.com/bigquery?ws=!1m6!1m5!19m4!1m3!1s{project_id}!2s{location}!3s{repo_id}"
+            pipeline_name = "BigQuery Pipeline"
+        else:
+            workspace_url = f"https://console.cloud.google.com/bigquery/dataform/locations/{location}/repositories/{repo_id}/workspaces/{draft_workspace_id}?project={project_id}"
+            pipeline_name = "Dataform Workspace"
+
+        html_email = generate_html_email(project_id, location, repo_id, draft_workspace_id, job_id, analysis, workspace_url, pipeline_name)
+        
         subject = f"Dataform Job Failure RCA: {job_id}"
-        send_email(project_id, user_email, subject, html_email, analysis, workspace_url)
+        send_email(project_id, user_email, subject, html_email, analysis, workspace_url, pipeline_name)
 
     except Exception as e:
         logger.error(f"Error processing processing event: {e}")
