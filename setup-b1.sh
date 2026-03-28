@@ -1,13 +1,13 @@
 #!/bin/bash
 set -e
 
-PROJECT_ID="project-id"
+PROJECT_ID="bq-dataworkeragent-test"
 REGION="us-central1"
 TOPIC_NAME="dataform-failures"
 SINK_NAME="dataform-failure-sink"
 FUNCTION_NAME="troubleshoot-dataform"
-SERVICE_ACCOUNT="project_number-compute@developer.gserviceaccount.com" # Default compute SA for this project
-USER_EMAIL=${USER_EMAIL:-"your-email@gmail.com"} # Change this to the target recipient email
+SERVICE_ACCOUNT="954904738192-compute@developer.gserviceaccount.com" # Default compute SA for this project
+USER_EMAIL=${USER_EMAIL:-"sunan@google.com"} # Change this to the target recipient email
 ALLOWED_DATAFORM_REPOSITORIES=${ALLOWED_DATAFORM_REPOSITORIES:-""} # Comma separated list of repo names (e.g. "my-repo,other-repo"), leave empty for all
 # Or we can let gcloud pick the default if we don't specify --service-account, 
 # but user asked to "use default compute service account".
