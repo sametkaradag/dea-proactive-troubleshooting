@@ -1,17 +1,30 @@
 #!/bin/bash
 set -e
 
-PROJECT_ID="project-id"
-REGION="us-central1"
-TOPIC_NAME="dataform-failures"
-SINK_NAME="dataform-failure-sink"
-FUNCTION_NAME="troubleshoot-dataform"
-SERVICE_ACCOUNT="project_number-compute@developer.gserviceaccount.com" # Default compute SA for this project
-USER_EMAILS=${USER_EMAILS:-"your-email@gmail.com"} # Comma-separated list of recipient emails (e.g. "a@x.com,b@x.com")
-ALLOWED_DATAFORM_REPOSITORIES=${ALLOWED_DATAFORM_REPOSITORIES:-""} # Comma separated list of repo names (e.g. "my-repo,other-repo"), leave empty for all
-# Or we can let gcloud pick the default if we don't specify --service-account, 
-# but user asked to "use default compute service account".
-# Typically: [PROJECT_NUMBER]-compute@developer.gserviceaccount.com
+# Parse the arguments and declare them as variables
+OLDIFS=${IFS}
+for arg in "$*"; do
+  if [ -z "${arg}" ]; then
+    continue;
+  fi
+  if [ "${arg}" = "--" ]; then
+    break;
+  fi
+  IFS='='
+  read -ra pair <<< "${arg}"
+  declare "${pair[0]#'--'}=${pair[1]}"
+  IFS=${OLDIFS}
+done
+IFS=${OLDIFS}
+
+PROJECT_ID=${project:-$(gcloud config get core/project)}
+REGION=${region:-$(gcloud config get compute/region)}
+SERVICE_ACCOUNT=${sa:-$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")} # Default compute SA for this project
+TOPIC_NAME=${topic:-"dataform-failures"}
+SINK_NAME=${sink:-"dataform-failure-sink"}
+FUNCTION_NAME=${function:-"troubleshoot-dataform"}
+USER_EMAIL=${email?"Please provide the notification email through the --email argument"} # Change this to the target recipient email
+ALLOWED_DATAFORM_REPOSITORIES=${repos:-""} # Comma separated list of repo names (e.g. "my-repo,other-repo"), leave empty for all
 
 echo "Enabling APIs..."
 gcloud services enable \
