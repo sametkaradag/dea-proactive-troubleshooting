@@ -19,7 +19,7 @@ IFS=${OLDIFS}
 
 PROJECT_ID=${project:-$(gcloud config get core/project)}
 REGION=${region:-$(gcloud config get compute/region)}
-SERVICE_ACCOUNT=${sa:-$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")} # Default compute SA for this project
+SERVICE_ACCOUNT=${sa:-"$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")-compute@developer.gserviceaccount.com"} # Default compute SA for this project
 TOPIC_NAME=${topic:-"dataform-failures"}
 SINK_NAME=${sink:-"dataform-failure-sink"}
 FUNCTION_NAME=${function:-"troubleshoot-dataform"}
