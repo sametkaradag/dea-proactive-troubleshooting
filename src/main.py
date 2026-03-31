@@ -424,10 +424,13 @@ def troubleshoot_dataform(cloud_event):
             logger.warning("Missing essential context (Project/Location/Repo). Skipping DEA call.")
             return
 
-        user_email = os.environ.get("USER_EMAIL")
-        if not user_email:
+        user_email_raw = os.environ.get("USER_EMAIL", "")
+        if not user_email_raw:
             logger.warning("USER_EMAIL environment variable not set. Falling back to default.")
-            user_email = "you@example.com" # Default placeholder
+            user_email_raw = "you@example.com" # Default placeholder
+        # Support comma-separated emails; use the first one for workspace naming
+        user_emails = [e.strip() for e in user_email_raw.split(",") if e.strip()]
+        user_email = user_emails[0] if user_emails else "you@example.com"
         original_workspace_id = labels.get("workspace_id", "default")
         
         # Convert email to draft workspace ID format: sametkaradag_google_com-agent-draft

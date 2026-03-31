@@ -7,7 +7,7 @@ TOPIC_NAME="dataform-failures"
 SINK_NAME="dataform-failure-sink"
 FUNCTION_NAME="troubleshoot-dataform"
 SERVICE_ACCOUNT="project_number-compute@developer.gserviceaccount.com" # Default compute SA for this project
-USER_EMAIL=${USER_EMAIL:-"your-email@gmail.com"} # Change this to the target recipient email
+USER_EMAILS=${USER_EMAILS:-"your-email@gmail.com"} # Comma-separated list of recipient emails (e.g. "a@x.com,b@x.com")
 ALLOWED_DATAFORM_REPOSITORIES=${ALLOWED_DATAFORM_REPOSITORIES:-""} # Comma separated list of repo names (e.g. "my-repo,other-repo"), leave empty for all
 # Or we can let gcloud pick the default if we don't specify --service-account, 
 # but user asked to "use default compute service account".
@@ -42,7 +42,7 @@ gcloud functions deploy "$FUNCTION_NAME" \
     --trigger-topic="$TOPIC_NAME" \
     --project="$PROJECT_ID" \
     --service-account="$SERVICE_ACCOUNT" \
-    --set-env-vars USER_EMAIL="$USER_EMAIL" \
+    --set-env-vars USER_EMAIL="$USER_EMAILS" \
     --timeout=300s # DEA might take a bit to generate RCA
 
 echo "Creating or Updating Log Sink..."
@@ -135,15 +135,22 @@ CHANNEL_NAME=$(gcloud beta monitoring channels create \
 
 echo "Created Pub/Sub Notification Channel: $CHANNEL_NAME"
 
-echo "Creating Email Notification Channel..."
-EMAIL_CHANNEL_NAME=$(gcloud beta monitoring channels create \
-    --display-name="Dataform RCA Email Channel" \
-    --type=email \
-    --channel-labels=email_address="$USER_EMAIL" \
-    --project="$PROJECT_ID" \
-    --format="value(name)")
-
-echo "Created Email Notification Channel: $EMAIL_CHANNEL_NAME"
+echo "Creating Email Notification Channels..."
+EMAIL_CHANNEL_NAMES=()
+IFS=',' read -ra EMAIL_LIST <<< "$USER_EMAILS"
+for email in "${EMAIL_LIST[@]}"; do
+    email=$(echo "$email" | awk '{$1=$1};1') # trim whitespace
+    if [ -n "$email" ]; then
+        CH=$(gcloud beta monitoring channels create \
+            --display-name="Dataform RCA Email Channel ($email)" \
+            --type=email \
+            --channel-labels=email_address="$email" \
+            --project="$PROJECT_ID" \
+            --format="value(name)")
+        echo "Created Email Notification Channel for $email: $CH"
+        EMAIL_CHANNEL_NAMES+=("$CH")
+    fi
+done
 
 echo "Creating or Updating Log-Based Metric..."
 gcloud logging metrics create dataform_rca_metric \
@@ -172,7 +179,7 @@ conditions:
           perSeriesAligner: ALIGN_DELTA
 notificationChannels:
   - $CHANNEL_NAME
-  - $EMAIL_CHANNEL_NAME
+$(for ch in "${EMAIL_CHANNEL_NAMES[@]}"; do echo "  - $ch"; done)
 documentation:
   content: "A Root Cause Analysis has been generated for a failed Dataform Job. Please check the Cloud Function Logs to view the generated HTML email containing the RCA details and Workspace Link."
   mimeType: text/markdown
