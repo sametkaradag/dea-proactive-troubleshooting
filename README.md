@@ -24,27 +24,30 @@ The agent analyzes the failure, provides a Root Cause Analysis (RCA), and automa
 
 The entire architecture can be deployed using the provided `setup.sh` script.
 
-### Configuration
-
-Before running the script, you can configure the environment variables at the top of `setup.sh` or pass them in at runtime:
-
-```bash
-export PROJECT_ID="project-id"
-export REGION="us-central1"
-export USER_EMAIL="your-email@google.com" # The email to receive the RCA reports
-
-# Optional: Comma-separated list of repository names to filter. Leave empty for all repositories.
-export ALLOWED_DATAFORM_REPOSITORIES="repo1,repo2" 
-```
-
 ### Installation
 
 Run the setup script to provision the infrastructure:
 
 ```bash
 chmod +x setup.sh
-./setup.sh
+./setup.sh --emails=<notification-email@domain>
 ```
+
+By default it will monitor all Dataform pipeline executions in the default project
+configured in your local gcloud environment.
+
+### Configuration
+
+You can alter the behavior of the monitoring with the following parameters to the setup script.
+
+- `--emails=<emails>` a comma separate list of email addresses to notify.
+- `--project=<project>` the GCP project to monitor.
+- `--region=<region>` the region where the Cloud Function will be deployed.
+- `--sa=<service-account>` the service account of the Cloud Function.
+- `--repos=<dataform-repos>` a comma separate list of Dataform repository names to monitor.
+- `--topic=<pubsub-topic>` the name of the Pub/Sub topic.
+- `--sink=<sink-name>` the name of the Cloud Logging sink.
+- `--function=<function-name>` the name of the Cloud Function.
 
 ## How It Works
 

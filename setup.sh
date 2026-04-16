@@ -23,7 +23,7 @@ SERVICE_ACCOUNT=${sa:-"$(gcloud projects describe "${PROJECT_ID}" --format="valu
 TOPIC_NAME=${topic:-"dataform-failures"}
 SINK_NAME=${sink:-"dataform-failure-sink"}
 FUNCTION_NAME=${function:-"troubleshoot-dataform"}
-USER_EMAIL=${email?"Please provide the notification email through the --email argument"} # Change this to the target recipient email
+USER_EMAILS=${emails?"Please provide the notification email through the --email argument"} # Change this to the target recipient email
 ALLOWED_DATAFORM_REPOSITORIES=${repos:-""} # Comma separated list of repo names (e.g. "my-repo,other-repo"), leave empty for all
 
 echo "Enabling APIs..."
