@@ -21,9 +21,23 @@ def get_access_token():
     credentials.refresh(Request())
     return credentials.token
 
-def prepare_draft_workspace(project_id, location, repo_id, workspace_id):
+def is_bq_pipeline(token, project_id, location, repo_id):
+    """Check if the repo has label bigquery-workflow."""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    parent = f"projects/{project_id}/locations/{location}/repositories/{repo_id}"
+    get_url = f"https://dataform.googleapis.com/v1beta1/{parent}"
+    response = requests.get(get_url, headers=headers)
+    if response.status_code == 200:
+        body = response.json()
+        if "labels" in body and "bigquery-workflow" in body["labels"]:
+            return True
+    return False
+
+def prepare_draft_workspace(token, project_id, location, repo_id, workspace_id):
     """Creates a draft workspace if it doesn't exist."""
-    token = get_access_token()
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
@@ -169,12 +183,11 @@ def get_invocation_error_details(project_id, location, repo_id, job_id):
     return "\n".join(error_parts) if error_parts else ""
 
 
-def call_dea_agent(project_id, location, repo_id, workspace_id, job_id, user_email, original_workspace_id="default", error_details=""):
+def call_dea_agent(token, project_id, location, repo_id, workspace_id, job_id, user_email, original_workspace_id="default", error_details=""):
     """Calls the Data Engineering Agent (DEA) to analyze the failure and apply fixes to the draft workspace."""
     
     url = f"https://geminidataanalytics.googleapis.com/v1/a2a/projects/{project_id}/locations/us/agents/dataengineeringagent/v1/message:stream"
     
-    token = get_access_token()
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
@@ -444,6 +457,10 @@ def troubleshoot_dataform(cloud_event):
         if not user_email_raw:
             logger.warning("USER_EMAIL environment variable not set. Falling back to default.")
             user_email_raw = "you@example.com" # Default placeholder
+
+        token = get_access_token()
+        bq_pipeline = is_bq_pipeline(token, project_id, location, repo_id)
+
         # Support comma-separated emails; use the first one for workspace naming
         user_emails = [e.strip() for e in user_email_raw.split(",") if e.strip()]
         user_email = user_emails[0] if user_emails else "you@example.com"
@@ -455,7 +472,7 @@ def troubleshoot_dataform(cloud_event):
         
         # Prepare the draft workspace for the DEA to apply fixes
         logger.info(f"Preparing draft workspace: {draft_workspace_id}")
-        prepare_draft_workspace(project_id, location, repo_id, draft_workspace_id)
+        prepare_draft_workspace(token, project_id, location, repo_id, draft_workspace_id)
         
         # Retrieve detailed error information using Dataform API + Cloud Logging
         logger.info(f"Retrieving invocation error details for job {job_id}...")
@@ -471,12 +488,12 @@ def troubleshoot_dataform(cloud_event):
                 error_details = json.dumps(log_entry["jsonPayload"], indent=2)
 
         analysis = call_dea_agent(
-            project_id, location, repo_id, draft_workspace_id, job_id, user_email,
+            token, project_id, location, repo_id, draft_workspace_id, job_id, user_email,
             original_workspace_id=original_workspace_id, error_details=error_details
         )
-        
-        is_uuid = bool(re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", str(repo_id)))
-        if is_uuid:
+       
+ 
+        if bq_pipeline:
             workspace_url = f"https://console.cloud.google.com/bigquery?ws=!1m6!1m5!19m4!1m3!1s{project_id}!2s{location}!3s{repo_id}"
             pipeline_name = "BigQuery Pipeline"
         else:
@@ -491,3 +508,4 @@ def troubleshoot_dataform(cloud_event):
     except Exception as e:
         logger.error(f"Error processing processing event: {e}")
         raise
+
